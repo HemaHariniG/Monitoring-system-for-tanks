@@ -1,106 +1,61 @@
-#include <Wire.h> 
-#include <SPI.h>
+#include <Adafruit_MAX31865.h>
 
-//Variables for the PT100 boards
-double resistance;
-uint8_t reg1, reg2; //reg1 holds MSB, reg2 holds LSB for RTD
-uint16_t fullreg; //fullreg holds the combined reg1 and reg2
-double temperature;
-//Variables and parameters for the R - T conversion
-double Z1, Z2, Z3, Z4, Rt;
-double RTDa = 3.9083e-3;
-double RTDb = -5.775e-7;
-double rpoly = 0;
+// Use software SPI: CS, DI, DO, CLK
+Adafruit_MAX31865 thermo = Adafruit_MAX31865(25,23, 32, 33);
+// use hardware SPI, just pass in the CS pin
+//Adafruit_MAX31865 thermo = Adafruit_MAX31865(10);
 
-const int chipSelectPin = 5;
+// The value of the Rref resistor. Use 430.0 for PT100 and 4300.0 for PT1000
+#define RREF      430.0
+// The 'nominal' 0-degrees-C resistance of the sensor
+// 100.0 for PT100, 1000.0 for PT1000
+#define RNOMINAL  100.0
 
-void setup()
-{
-  SPI.begin();
-  Serial.begin(9600); //Start serial
+void setup() {
+  Serial.begin(115200);
+  Serial.println("Adafruit MAX31865 PT100 Sensor Test!");
 
-  pinMode(chipSelectPin, OUTPUT); //because CS is manually switched  
+  thermo.begin(MAX31865_3WIRE);  // set to 2WIRE or 4WIRE as necessary
 }
 
-void loop()
-{
-  readRegister();
-  convertToTemperature();
-}
-void convertToTemperature()
-{
-  Rt = resistance;
-  Rt /= 32768;
-  Rt *= 430; //This is now the real resistance in Ohms
 
-  Z1 = -RTDa;
-  Z2 = RTDa * RTDa - (4 * RTDb);
-  Z3 = (4 * RTDb) / 100;
-  Z4 = 2 * RTDb;
+void loop() {
+  uint16_t rtd = thermo.readRTD();
 
-  temperature = Z2 + (Z3 * Rt);
-  temperature = (sqrt(temperature) + Z1) / Z4;
+  Serial.print("RTD value: "); Serial.println(rtd);
+  float ratio = rtd;
+  ratio /= 32768;
+  //Serial.print("Ratio = "); Serial.println(ratio,8);
+  //Serial.print("Resistance = "); Serial.println(RREF*ratio,8);
+  Serial.print("Temperature = "); Serial.println(thermo.temperature(RNOMINAL, RREF));
 
-  if (temperature >= 0)
-  {
-    Serial.print("Temperature: ");
-    Serial.println(temperature); //Temperature in Celsius degrees
-    delay(1000);
-    return; //exit
+  // Check and print any faults
+  uint8_t fault = thermo.readFault();
+  if (fault) {
+    Serial.print("Fault 0x"); Serial.println(fault, HEX);
+    if (fault & MAX31865_FAULT_HIGHTHRESH) {
+      Serial.println("RTD High Threshold"); 
+    }
+    if (fault & MAX31865_FAULT_LOWTHRESH) {
+      Serial.println("RTD Low Threshold"); 
+    }
+    if (fault & MAX31865_FAULT_REFINLOW) {
+      Serial.println("REFIN- > 0.85 x Bias"); 
+    }
+    if (fault & MAX31865_FAULT_REFINHIGH) {
+      Serial.println("REFIN- < 0.85 x Bias - FORCE- open"); 
+    }
+    if (fault & MAX31865_FAULT_RTDINLOW) {
+      Serial.println("RTDIN- < 0.85 x Bias - FORCE- open"); 
+    }
+    if (fault & MAX31865_FAULT_OVUV) {
+      Serial.println("Under/Over voltage"); 
+    }
+    thermo.clearFault();
   }
-  else
-  {
-    Rt /= 100;
-    Rt *= 100; // normalize to 100 ohm
-
-    rpoly = Rt;
-
-    temperature = -242.02;
-    temperature += 2.2228 * rpoly;
-    rpoly *= Rt; // square
-    temperature += 2.5859e-3 * rpoly;
-    rpoly *= Rt; // ^3
-    temperature -= 4.8260e-6 * rpoly;
-    rpoly *= Rt; // ^4
-    temperature -= 2.8183e-8 * rpoly;
-    rpoly *= Rt; // ^5
-    temperature += 1.5243e-10 * rpoly;
-
-    Serial.print("Temperature: ");
-    Serial.println(temperature); //Temperature in Celsius degrees
-  }
+  Serial.println();
+  delay(1000);
+  readPH();
   
 }
- void readRegister()
-{
-  SPI.beginTransaction(SPISettings(500000, MSBFIRST, SPI_MODE1));
-  digitalWrite(chipSelectPin, LOW);
 
-  SPI.transfer(0x80); //80h = 128 - config register
-  SPI.transfer(0xB0); //B0h = 176 - 10110000: bias ON, 1-shot, start 1-shot, 3-wire, rest are 0
-  digitalWrite(chipSelectPin, HIGH);
-
-  digitalWrite(chipSelectPin, LOW);
-  SPI.transfer(1);
-  reg1 = SPI.transfer(0xFF);
-  reg2 = SPI.transfer(0xFF);
-  digitalWrite(chipSelectPin, HIGH);
-
-  fullreg = reg1; //read MSB
-  fullreg <<= 8;  //Shift to the MSB part
-  fullreg |= reg2; //read LSB and combine it with MSB
-  fullreg >>= 1; //Shift D0 out.
-  resistance = fullreg; //pass the value to the resistance variable
-  //note: this is not yet the resistance of the RTD!
-
-  digitalWrite(chipSelectPin, LOW);
-
-  SPI.transfer(0x80); //80h = 128
-  SPI.transfer(144); //144 = 10010000
-  SPI.endTransaction();
-  digitalWrite(chipSelectPin, HIGH);
-
-  Serial.print("Resistance: ");
-  Serial.println(resistance);
-  delay(1000);
-}
