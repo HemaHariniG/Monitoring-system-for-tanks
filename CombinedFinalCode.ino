@@ -1,34 +1,28 @@
-#include <Wire.h> 
+#include <Wire.h>
 #include <SPI.h>
+#include <Adafruit_MAX31865.h>
 
+// RTD Parameters
+Adafruit_MAX31865 thermo = Adafruit_MAX31865(25,23, 32, 33);
+// The value of the Rref resistor. Use 430.0 for PT100 and 4300.0 for PT1000
+#define RREF      430.0
+// The 'nominal' 0-degrees-C resistance of the sensor
+// 100.0 for PT100, 1000.0 for PT1000
+#define RNOMINAL  100.0
 
-//Variables for the PT100 boards
-double resistance;
-uint8_t reg1, reg2; //reg1 holds MSB, reg2 holds LSB for RTD
-uint16_t fullreg; //fullreg holds the combined reg1 and reg2
-double temperature;
-//Variables and parameters for the R - T conversion
-double Z1, Z2, Z3, Z4, Rt;
-double RTDa = 3.9083e-3;
-double RTDb = -5.775e-7;
-double rpoly = 0;
-
-const int chipSelectPin = 5; // 
-
-int top=12;
-int low=13;
-int mid=14;
-
-
-#define TdsSensorPin 25
-#define VREF 5.0              // analog reference voltage(Volt) of the ADC
+// TDS Sensor Setup
+#define TdsSensorPin 4
+#define VREF 3.3              // analog reference voltage(Volt) of the ADC
 #define SCOUNT  30            // sum of sample point
-#define SensorPin 15          // the pH meter Analog output is connected with the Arduino’s Analog
 
-unsigned long int avgValue;  //Store the average value of the sensor feedback
-float b;
-int buf[10],temp;
+// pH Sensor Setup
+#define PH_SENSOR_PIN 15
 
+// Water Level Sensor Pins
+#define TOP_PIN 12
+#define LOW_PIN 13
+#define MID_PIN 14
+////
 int analogBuffer[SCOUNT];     // store the analog value in the array, read from ADC
 int analogBufferTemp[SCOUNT];
 int analogBufferIndex = 0;
@@ -36,9 +30,60 @@ int copyIndex = 0;
 
 float averageVoltage = 0;
 float tdsValue = 0;
-      // current temperature for compensation
+float temperature = 25;       // current temperature for compensation
 
-// median filtering algorithm
+void setup() {
+  Serial.begin(115200);
+
+  pinMode(TdsSensorPin,INPUT);
+  pinMode(TOP_PIN, INPUT_PULLUP);
+  pinMode(LOW_PIN, INPUT_PULLUP);
+  pinMode(MID_PIN, INPUT_PULLUP);
+  pinMode(PH_SENSOR_PIN, INPUT);
+  thermo.begin(MAX31865_3WIRE);  // set to 2WIRE or 4WIRE as necessary
+  Serial.println("START");
+}
+
+void readRTDTemperature() {
+  uint16_t rtd = thermo.readRTD();
+
+  Serial.print("RTD value: "); Serial.println(rtd);
+  float ratio = rtd;
+  ratio /= 32768;
+  //Serial.print("Ratio = "); Serial.println(ratio,8);
+  //Serial.print("Resistance = "); Serial.println(RREF*ratio,8);
+  Serial.print("Temperature = "); Serial.println(thermo.temperature(RNOMINAL, RREF));
+
+  // Check and print any faults
+  uint8_t fault = thermo.readFault();
+  if (fault) {
+    Serial.print("Fault 0x"); Serial.println(fault, HEX);
+    if (fault & MAX31865_FAULT_HIGHTHRESH) {
+      Serial.println("RTD High Threshold"); 
+    }
+    if (fault & MAX31865_FAULT_LOWTHRESH) {
+      Serial.println("RTD Low Threshold"); 
+    }
+    if (fault & MAX31865_FAULT_REFINLOW) {
+      Serial.println("REFIN- > 0.85 x Bias"); 
+    }
+    if (fault & MAX31865_FAULT_REFINHIGH) {
+      Serial.println("REFIN- < 0.85 x Bias - FORCE- open"); 
+    }
+    if (fault & MAX31865_FAULT_RTDINLOW) {
+      Serial.println("RTDIN- < 0.85 x Bias - FORCE- open"); 
+    }
+    if (fault & MAX31865_FAULT_OVUV) {
+      Serial.println("Under/Over voltage"); 
+    }
+    thermo.clearFault();
+  }
+  Serial.println();
+  delay(1000);
+  readPH();
+}
+
+// median filtering algorithm for tds
 int getMedianNum(int bArray[], int iFilterLen){
   int bTab[iFilterLen];
   for (byte i = 0; i<iFilterLen; i++)
@@ -62,54 +107,7 @@ int getMedianNum(int bArray[], int iFilterLen){
   return bTemp;
 }
 
-void setup(){
-  SPI.begin();
-  Serial.begin(115200);
-  pinMode(chipSelectPin, OUTPUT);
-  pinMode(TdsSensorPin,INPUT);
-  pinMode(top,INPUT_PULLUP);
-  pinMode(low,INPUT_PULLUP);
-  pinMode(mid,INPUT_PULLUP);
-  pinMode(SensorPin,OUTPUT); 
-  Serial.println("START");
-
-}
-
-void loop() {
-
-// PT100
-readRegister();
-convertToTemperature();
-// WATER LEVEL
-Serial.print( digitalRead(low));
-Serial.print(digitalRead(mid));
-Serial.println(digitalRead(top)); 
-int t=digitalRead(top);
-int l=digitalRead(low);
-int m=digitalRead(mid);
-if(l==0 && m==1 && t==1){
-  Serial.println("Water level low");
-  delay(500);
-}
-
-else if(l==0 && m==0 && t==1){
-
-  Serial.println("Water level mid");
-  delay(500);
-}
- 
-
-else if(l==0 && m==0 && t==0){
-
-  Serial.println("Water level top");
-  delay(500);
-}
-else{
-Serial.println("tank empty");
-  
-}
-// TDS
-  float temperature = 16; 
+void readTDS() {
   static unsigned long analogSampleTimepoint = millis();
   if(millis()-analogSampleTimepoint > 40U){     //every 40 milliseconds,read the analog value from the ADC
     analogSampleTimepoint = millis();
@@ -127,7 +125,7 @@ Serial.println("tank empty");
       analogBufferTemp[copyIndex] = analogBuffer[copyIndex];
       
       // read the analog value more stable by the median filtering algorithm, and convert to voltage value
-      averageVoltage = getMedianNum(analogBufferTemp,SCOUNT) * (float)VREF / 1024.0;
+      averageVoltage = getMedianNum(analogBufferTemp,SCOUNT) * (float)VREF / 4096.0;
       
       //temperature compensation formula: fFinalResult(25^C) = fFinalResult(current)/(1.0+0.02*(fTP-25.0)); 
       float compensationCoefficient = 1.0+0.02*(temperature-25.0);
@@ -141,115 +139,60 @@ Serial.println("tank empty");
       //Serial.print(averageVoltage,2);
       //Serial.print("V   ");
       Serial.print("TDS Value:");
-      Serial.print(tdsValue);
+      Serial.print(tdsValue,0);
       Serial.println("ppm");
-// ph
-for(int i=0;i<10;i++)       //Get 10 sample value from the sensor for smooth the value
-  { 
-    buf[i]=analogRead(SensorPin);
+    }
+  }
+}
+
+void readWaterLevel() {
+  int topState = digitalRead(TOP_PIN);
+  int lowState = digitalRead(LOW_PIN);
+  int midState = digitalRead(MID_PIN);
+
+  Serial.print("Water Level: ");
+  if (lowState == LOW && midState == HIGH && topState == HIGH) {
+    Serial.println("Low");
+  } else if (lowState == LOW && midState == LOW && topState == HIGH) {
+    Serial.println("Mid");
+  } else if (lowState == LOW && midState == LOW && topState == LOW) {
+    Serial.println("Top");
+  } else {
+    Serial.println("Empty");
+  }
+}
+
+void readPH() {
+  unsigned long int avgValue = 0;         // Store the average value of the sensor feedback
+  int buf[10], temp;
+  for (int i = 0; i < 10; i++) {          // Get 10 sample value from the sensor for smoothing the value
+    buf[i] = analogRead(PH_SENSOR_PIN);
     delay(10);
   }
-  for(int i=0;i<9;i++)        //sort the analog from small to large
-  {
-    for(int j=i+1;j<10;j++)
-    {
-      if(buf[i]>buf[j])
-      {
-        temp=buf[i];
-        buf[i]=buf[j];
-        buf[j]=temp;
+  for (int i = 0; i < 9; i++) {           // Sort the analog from small to large
+    for (int j = i + 1; j < 10; j++) {
+      if (buf[i] > buf[j]) {
+        temp = buf[i];
+        buf[i] = buf[j];
+        buf[j] = temp;
       }
     }
   }
-  avgValue=0;
-  for(int i=2;i<8;i++)                      //take the average value of 6 center sample
-    avgValue+=buf[i];
-  float phValue=(float)avgValue*5.0/1024/6; //convert the analog into millivolt
-  phValue=3.5*phValue;                      //convert the millivolt into pH value
-  Serial.print("    pH:");  
-  Serial.print(phValue,2);
-  Serial.println(" ");
-  digitalWrite(13, HIGH);       
-  delay(800);
-  digitalWrite(13, LOW);
-    }
+  for (int i = 2; i < 8; i++) {           // Take the average value of 6 center samples
+    avgValue += buf[i];
   }
+  float pHValue = (float)avgValue * 5.0 / 1024 / 6; // Convert the analog into millivolt
+  pHValue = 3.5 * pHValue;                // Convert the millivolt into pH value
+  // Print sensor readings
+  Serial.print("pH: ");
+  Serial.println(pHValue);
+
 }
-void convertToTemperature()
-{
 
-  Rt = resistance;
-  Rt /= 32768;
-  Rt *= 430; //This is now the real resistance in Ohms
-
-  Z1 = -RTDa;
-  Z2 = RTDa * RTDa - (4 * RTDb);
-  Z3 = (4 * RTDb) / 100;
-  Z4 = 2 * RTDb;
-
-  temperature = Z2 + (Z3 * Rt);
-  temperature = (sqrt(temperature) + Z1) / Z4;
-
-  if (temperature >= 0)
-  {
-    Serial.print("Temperature: ");
-    Serial.println(temperature); //Temperature in Celsius degrees
-    delay(1000);
-    return; //exit
-  }
-  else
-  {
-    Rt /= 100;
-    Rt *= 100; // normalize to 100 ohm
-
-    rpoly = Rt;
-
-    temperature = -242.02;
-    temperature += 2.2228 * rpoly;
-    rpoly *= Rt; // square
-    temperature += 2.5859e-3 * rpoly;
-    rpoly *= Rt; // ^3
-    temperature -= 4.8260e-6 * rpoly;
-    rpoly *= Rt; // ^4
-    temperature -= 2.8183e-8 * rpoly;
-    rpoly *= Rt; // ^5
-    temperature += 1.5243e-10 * rpoly;
-
-    Serial.print("Temperature: ");
-    Serial.println(temperature); //Temperature in Celsius degrees
-  }
-  
-}
- void readRegister()
-{
-  SPI.beginTransaction(SPISettings(500000, MSBFIRST, SPI_MODE1));
-  digitalWrite(chipSelectPin, LOW);
-
-  SPI.transfer(0x80); //80h = 128 - config register
-  SPI.transfer(0xB0); //B0h = 176 - 10110000: bias ON, 1-shot, start 1-shot, 3-wire, rest are 0
-  digitalWrite(chipSelectPin, HIGH);
-
-  digitalWrite(chipSelectPin, LOW);
-  SPI.transfer(1);
-  reg1 = SPI.transfer(0xFF);
-  reg2 = SPI.transfer(0xFF);
-  digitalWrite(chipSelectPin, HIGH);
-
-  fullreg = reg1; //read MSB
-  fullreg <<= 8;  //Shift to the MSB part
-  fullreg |= reg2; //read LSB and combine it with MSB
-  fullreg >>= 1; //Shift D0 out.
-  resistance = fullreg; //pass the value to the resistance variable
-  //note: this is not yet the resistance of the RTD!
-
-  digitalWrite(chipSelectPin, LOW);
-
-  SPI.transfer(0x80); //80h = 128
-  SPI.transfer(144); //144 = 10010000
-  SPI.endTransaction();
-  digitalWrite(chipSelectPin, HIGH);
-
-  Serial.print("Resistance: ");
-  Serial.println(resistance);
-  delay(1000);
+void loop() {
+  readRTDTemperature();
+  readTDS();
+  readWaterLevel();
+  readPH();
+  delay(1000); // Delay between readings
 }
